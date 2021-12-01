@@ -1,3 +1,4 @@
+import argparse
 import glob
 import numpy as np
 import os
@@ -28,6 +29,12 @@ fit_config = {
     'xgb_model': None,
 }
 
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train_chunks',action='store_true')
+    parser.add_argument('--hyperopt',action='store_true')
+    return parser.parse_args()
+
 def read_chunk(input_dir,ichunk):
     train = pd.read_csv(os.path.join(input_dir,'chunk{:d}_train.csv'.format(ichunk)),index_col=0)
     valid = pd.read_csv(os.path.join(input_dir,'chunk{:d}_valid.csv'.format(ichunk)),index_col=0)
@@ -57,7 +64,7 @@ def train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_conf
     )
     return model
 
-if __name__ == "__main__":
+def train_chunks():
     for ichunk in range(io_config['nchunk']):
         print("reading chunk",ichunk) 
         train,valid = read_chunk(io_config['input_csv_dir'],ichunk)
@@ -66,3 +73,66 @@ if __name__ == "__main__":
         print("fitting chunk",ichunk)
         model = train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config,fit_config)
         fit_config['xgb_model'] = model.get_booster()
+    return model
+
+def train():
+    train_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'train.csv'),index_col=0)
+    x_train,y_train,group_train = x_y_group(train_df)
+    valid_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'valid.csv'),index_col=0)
+    x_valid,y_valid,group_valid = x_y_group(valid_df)
+    del train_df,valid_df
+    model = train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config,fit_config)
+
+def hyperopt():
+    from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
+    
+    space = {
+        'objective': 'rank:map',
+        'max_depth': hp.choice("max_depth",np.arange(3, 10, dtype=int) ),
+        'gamma': hp.uniform ('gamma', 1,9),
+        'learning_rate': hp.uniform('learning_rate',0.1,1.0),
+        'reg_alpha' : hp.quniform('reg_alpha', 40,180,1),
+        'reg_lambda' : hp.uniform('reg_lambda', 0,1),
+        'colsample_bytree' : hp.uniform('colsample_bytree', 0.5,1),
+        'min_child_weight' : hp.quniform('min_child_weight', 0, 10, 1),
+        'n_estimators': 180,
+        'seed': 0,
+        'eval_metric':'map@5',
+    }
+    
+    train_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'train.csv'),index_col=0)
+    x_train,y_train,group_train = x_y_group(train_df)
+    valid_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'valid.csv'),index_col=0)
+    x_valid,y_valid,group_valid = x_y_group(valid_df)
+    del train_df,valid_df
+    
+    def objective(space):
+    
+        model = xgb.sklearn.XGBRanker(**space)
+        model.fit(
+            x_train, y_train, group_train, verbose=True,
+            eval_set=[(x_valid, y_valid)], eval_group=[group_valid],
+            early_stopping_rounds=5,
+        )    
+        print ("SCORE:", model.best_score)
+        return {'loss': -model.best_score, 'status': STATUS_OK }
+
+    trials = Trials()
+    best_hyperparams = fmin(
+        fn = objective,
+        space = space,
+        algo = tpe.suggest,
+        max_evals = 10,
+        trials = trials
+    )
+    print('Best hyperparameters: ',best_hyperparams)
+
+
+if __name__ == "__main__":
+    args = parse_arguments()
+    if args.train_chunks:
+        train_chunks()
+    elif args.hyperopt:
+        hyperopt()
+    else:
+        train()
