@@ -23,14 +23,13 @@ pd.set_option('display.width', 1000)
 pd.set_option('mode.chained_assignment', None)
 
 n_hotel_cluster = 100
-embedding_dim = 2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('Using device ',device)
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--target',action='store',default='hotel_cluster')
+    parser.add_argument('--task',action='store',default='train:hotel_cluster')
     return parser.parse_args()
 
 def read_csv(path):
@@ -59,10 +58,10 @@ def preprocess(df,feature_columns,target):
     valid = valid[features_to_keep]
     return train,valid,[len(df[feature_column].unique()) for feature_column in feature_columns]
 
-def fit(iterator, model, optimizer, criterion):
+def fit(iterator, model, optimizer, criterion, progressbar=False):
     train_loss = 0
     model.train()
-    for x,y in tqdm(iterator):
+    for x,y in tqdm(iterator) if progressbar else iterator:
         optimizer.zero_grad()
         y_hat = model(x.to(device))
         loss = criterion(y_hat, y.to(device))
@@ -71,10 +70,10 @@ def fit(iterator, model, optimizer, criterion):
         optimizer.step()
     return train_loss / len(iterator.dataset)
 
-def test(iterator, model, criterion):
+def test(iterator, model, criterion, progressbar=False):
     train_loss = 0
     model.eval()
-    for x,y in tqdm(iterator):                    
+    for x,y in tqdm(iterator) if progressbar else iterator:
         with torch.no_grad():
             y_hat = model(x.to(device))
         loss = criterion(y_hat, y.to(device))
@@ -110,8 +109,10 @@ def train(train_x,train_y,trainset,valid_x,valid_y,validset,field_dims,train_con
         scheduler.step()
         secs = int(time.time() - start_time)
         tqdm.write(f'epoch {epoch}. time: {secs}[s]')
-        tqdm.write(f'\ttrain loss: {(math.sqrt(train_loss)):.4f}')
-        tqdm.write(f'\tvalidation loss: {(math.sqrt(valid_loss)):.4f}')
+        tqdm.write(f'\ttrain loss: {train_loss:.4f}')
+        tqdm.write(f'\tvalidation loss: {valid_loss:.4f}')
+        tqdm.write(f'\ttrain metric: {train_metric:.4f}')
+        tqdm.write(f'\tvalidation metric: {valid_metric:.4f}')
 
     return model,trn_losses,val_losses,trn_metrics,val_metrics
 
@@ -127,18 +128,18 @@ def save(model,trn_losses,val_losses,trn_metrics,val_metrics,train_config):
 
     fig,ax = plt.subplots()
     n_trn_epoch,n_val_epoch = len(trn_losses),len(val_losses)
-    ax.plot(range(n_trn_epoch),trn_losses,label='train')
-    ax.plot(range(n_val_epoch),val_losses,label='valid')
+    ax.plot(range(n_trn_epoch),trn_losses,label='train',marker='o')
+    ax.plot(range(n_val_epoch),val_losses,label='valid',marker='o')
     fig.savefig(os.path.join(save_dir,train_config.get('loss_plot_fname','loss.png')))
 
     plt.clf()
     fig,ax = plt.subplots()
     n_trn_epoch,n_val_epoch = len(trn_metrics),len(val_metrics)
-    ax.plot(range(n_trn_epoch),trn_metrics,label='train')
-    ax.plot(range(n_val_epoch),val_metrics,label='valid')
+    ax.plot(range(n_trn_epoch),trn_metrics,label='train',marker='o')
+    ax.plot(range(n_val_epoch),val_metrics,label='valid',marker='o')
     fig.savefig(os.path.join(save_dir,train_config.get('metric_plot_fname','metrics.png')))
 
-def run_is_booking():
+def train_is_booking():
 
     def prepare_tensor(df):
         x = torch.tensor(df[feature_columns].values).long()
@@ -161,13 +162,7 @@ def run_is_booking():
         save_model_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/output/211216_catvar_booking.model',
     )
     
-    feature_columns = [
-            'srch_destination_id','srch_destination_type_id',
-            'user_id','user_location_country','user_location_region','user_location_city',
-            'site_name','channel',
-            'is_mobile','is_package',
-            'hotel_cluster',
-            ]
+    feature_columns = ['srch_destination_id','srch_destination_type_id','user_id','user_location_country','user_location_region','user_location_city','site_name','channel','is_mobile','is_package','hotel_cluster',]
 
     df = read_csv(io_config['input_csv_path'])
     train_df,valid_df,field_dims = preprocess(df,feature_columns,'is_booking')
@@ -175,7 +170,7 @@ def run_is_booking():
     valid_x,valid_y,validset = prepare_tensor(valid_df)
     train(train_x,train_y,trainset,valid_x,valid_y,validset,field_dims,train_config)
 
-def run_hotel_cluster():
+def train_hotel_cluster():
 
     bce_loss_fn = nn.BCELoss()
     def bce(y_hat,y):
@@ -188,7 +183,7 @@ def run_hotel_cluster():
         return x,y,dataset
 
     io_config = dict(
-        input_csv_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/train_lite.csv',
+        input_csv_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/train_is_booking.csv',
     )
 
     feature_columns = [
@@ -202,7 +197,7 @@ def run_hotel_cluster():
         lr=0.1,
         wd=1e-5,
         bs=1024,
-        epochs=5,
+        epochs=1,
         embedding_dim=4,
         loss=bce,
         metric=AUROC(),
@@ -222,9 +217,9 @@ def run_hotel_cluster():
 
 if __name__ == '__main__':
     args = parse_arguments()
-    if args.target == 'is_booking':
-        run_is_booking()
-    elif args.target == 'hotel_cluster':
-        run_hotel_cluster()
+    if args.task == 'train:is_booking':
+        train_is_booking()
+    elif args.task == 'train:hotel_cluster':
+        train_hotel_cluster()
     else:
         raise RuntimeError('target {:s} not supported'.format(args.target))
