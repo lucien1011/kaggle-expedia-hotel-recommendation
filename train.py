@@ -3,37 +3,27 @@ import glob
 import numpy as np
 import os
 import pandas as pd
+import pprint
+import random
 import xgboost as xgb
 
 io_config = dict(
-    input_csv_dir='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/preprocess/211201_baseline/',
+    base_dir='storage/output/211217_baseline_nsample1e5/',
     nchunk=4,
 )
+io_config['input_csv_dir'] = io_config['base_dir']
+io_config['save_model_path']=os.path.join(io_config['base_dir'],'pairwise.model')
 
-xgb_config = {
-    'colsample_bytree': 0.7959932314624918, 
-    'gamma': 3.236981174565596, 
-    'learning_rate': 0.8092969260411637, 
-    'min_child_weight': 10.0, 
-    'reg_alpha': 83.0, 
-    'reg_lambda': 0.9226958452956067, 
-    'max_depth': 6,
-    'n_estimators': 180,
-    'seed': 0,
-    'eval_metric':'map@5',
-    'objective': 'rank:map',
-}
+xgb_config = {'eval_metric': 'map@5', 'gamma': 5.137244663650965, 'learning_rate': 0.3586551065993189, 'max_depth': 9, 'min_child_weight': 7.0, 'n_estimators': 180, 'objective': 'rank:pairwise', 'reg_alpha': 130.0, 'reg_lambda': 0.8589062653908213, 'seed': 42} 
     
-fit_config = {
-    'early_stopping_rounds': 5,
-    'xgb_model': None,
-}
-
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_chunks',action='store_true')
-    parser.add_argument('--hyperopt',action='store_true')
     return parser.parse_args()
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
 
 def read_chunk(input_dir,ichunk):
     train = pd.read_csv(os.path.join(input_dir,'chunk{:d}_train.csv'.format(ichunk)),index_col=0)
@@ -49,19 +39,15 @@ def x_y_group(data):
     print('shape (x,y,group): ',x.shape,y.shape,group.shape)
     return x,y,group
 
-def train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config,fit_config):
+def train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config):
+    seed_everything()
     model = xgb.sklearn.XGBRanker(**xgb_config)
-    es = xgb.callback.EarlyStopping(
-        rounds=fit_config.get('early_stopping_rounds',5),
-        save_best=True,
-    )
     model.fit(
         x_train, y_train, group_train, verbose=True,
         eval_set=[(x_valid, y_valid)], eval_group=[group_valid],
-        early_stopping_rounds=fit_config.get('early_stopping_rounds',5),
-        xgb_model=fit_config.get('xgb_model',None),
-        callbacks=[es],
+        early_stopping_rounds=2,
     )
+    model.save_model(io_config['save_model_path'])
     return model
 
 def train_chunks():
@@ -71,8 +57,7 @@ def train_chunks():
         x_train,y_train,group_train = x_y_group(train)
         x_valid,y_valid,group_valid = x_y_group(valid)
         print("fitting chunk",ichunk)
-        model = train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config,fit_config)
-        fit_config['xgb_model'] = model.get_booster()
+        model = train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config)
     return model
 
 def train():
@@ -81,58 +66,11 @@ def train():
     valid_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'valid.csv'),index_col=0)
     x_valid,y_valid,group_valid = x_y_group(valid_df)
     del train_df,valid_df
-    model = train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config,fit_config)
-
-def hyperopt():
-    from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
-    
-    space = {
-        'objective': 'rank:map',
-        'max_depth': hp.choice("max_depth",np.arange(3, 10, dtype=int) ),
-        'gamma': hp.uniform ('gamma', 1,9),
-        'learning_rate': hp.uniform('learning_rate',0.1,1.0),
-        'reg_alpha' : hp.quniform('reg_alpha', 40,180,1),
-        'reg_lambda' : hp.uniform('reg_lambda', 0,1),
-        'colsample_bytree' : hp.uniform('colsample_bytree', 0.5,1),
-        'min_child_weight' : hp.quniform('min_child_weight', 0, 10, 1),
-        'n_estimators': 180,
-        'seed': 0,
-        'eval_metric':'map@5',
-    }
-    
-    train_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'train.csv'),index_col=0)
-    x_train,y_train,group_train = x_y_group(train_df)
-    valid_df = pd.read_csv(os.path.join(io_config['input_csv_dir'],'valid.csv'),index_col=0)
-    x_valid,y_valid,group_valid = x_y_group(valid_df)
-    del train_df,valid_df
-    
-    def objective(space):
-    
-        model = xgb.sklearn.XGBRanker(**space)
-        model.fit(
-            x_train, y_train, group_train, verbose=True,
-            eval_set=[(x_valid, y_valid)], eval_group=[group_valid],
-            early_stopping_rounds=5,
-        )    
-        print ("SCORE:", model.best_score)
-        return {'loss': -model.best_score, 'status': STATUS_OK }
-
-    trials = Trials()
-    best_hyperparams = fmin(
-        fn = objective,
-        space = space,
-        algo = tpe.suggest,
-        max_evals = 10,
-        trials = trials
-    )
-    print('Best hyperparameters: ',best_hyperparams)
-
+    model = train_model(x_train,y_train,group_train,x_valid,y_valid,group_valid,xgb_config)
 
 if __name__ == "__main__":
     args = parse_arguments()
     if args.train_chunks:
         train_chunks()
-    elif args.hyperopt:
-        hyperopt()
     else:
         train()
