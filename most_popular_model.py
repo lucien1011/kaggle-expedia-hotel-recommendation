@@ -11,7 +11,7 @@ pd.set_option('mode.chained_assignment', None)
 n_hotel_cluster = 100
 
 io_config = dict(
-    input_csv_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/train_is_booking.csv',
+    input_csv_path='storage/train_is_booking.csv',
 )
 
 def apk(actual, predicted, k=10):
