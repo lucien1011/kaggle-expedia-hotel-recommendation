@@ -4,8 +4,11 @@ import os
 import pandas as pd
 import pickle
 import torch
+import torch.utils.data as data
 from tqdm import tqdm
 
+from data.tools import train_test_split
+from model.fm import FactorizationMachineModel
 from utils import Timer
 
 pd.set_option('display.max_rows', 500)
@@ -20,10 +23,11 @@ print('Using device ',device)
 
 io_config = dict(
     input_csv_path='storage/train_is_booking_category.csv',
-    fm_mapping_path='storage/output/211216_catvar_hotel_cluster/mapping.p',
-    fm_embed_dim=4,
-    output_csv_dir='storage/output/211218_baseline/',
-    chunksize=int(5e5),
+    fm_model_dir='storage/output/211220_catvar_hotel_cluster/',
+    click_rate_path='storage/output/211220_click_rate/click_rate.p',
+    book_rate_path='storage/output/211221_book_rate/book_rate.p',
+    output_csv_dir='storage/output/211221_baseline+fm_nsample1e5/',
+    nsample=int(1e5),
 )
 
 def explode_is_booking(is_booking,hotel_cluster,):
@@ -32,89 +36,82 @@ def explode_is_booking(is_booking,hotel_cluster,):
         out[hotel_cluster] = 1
     return out
 
-def read_fm_mapping(path):
-    return pickle.load(open(path,'rb'))
+def read_fm_model(model_dir):
+    return {hotel_cluster: torch.load(os.path.join(model_dir,'hotel_cluster_{:d}/'.format(hotel_cluster),'saved.model')) for hotel_cluster in range(n_hotel_cluster)}
 
-def baseline_preprocess(df, progressbar=True):
+def preprocess(df, progressbar=False):
+    
+    def prepare_tensor(df,feature_columns):
+        return torch.tensor(df[feature_columns].values).long()
+
+    def construct_df_fm(df,group,feature_columns,fm_model_dir):
+        fm_models = read_fm_model(fm_model_dir)
+        x = prepare_tensor(df,feature_columns)
+        dataloader = data.DataLoader(x,batch_size=int(2**18),shuffle=False)
+        init = {}
+        for hotel_cluster in range(n_hotel_cluster):
+            fm_models[hotel_cluster].eval()
+            s = []
+            for x in tqdm(dataloader) if progressbar else dataloader:
+                with torch.no_grad():
+                    y_hat = fm_models[hotel_cluster](x.to(device))
+                s.extend(y_hat.cpu().detach().numpy().tolist())
+            init[hotel_cluster] = s
+        df_group = pd.DataFrame({group:list(map(list,zip(*init.values())))})
+        return df_group
+
+    feature_groups = {
+            'srch_destination': ['srch_destination_id','srch_destination_type_id',],
+            'user': ['user_id','user_location_country','user_location_region','user_location_city',],
+            #'hotel': ['hotel_continent','hotel_country','hotel_market',],
+            #'market': ['site_name','channel','is_mobile','is_package',],
+    }
+    features_to_explode = [k for k in feature_groups] + ['book_rate','click_rate','is_booking',]
+    features_to_select = features_to_explode + ['srch_id','year','month','srch_duration','srch_trip_time_diff','orig_destination_distance','srch_adults_cnt','srch_children_cnt','srch_rm_cnt',]
 
     timer = Timer()
+
+    df = df.fillna(value=-1).reset_index()
 
     tqdm.write(f'Processing timestamp features')
     timer.start()
     df['srch_id'] = df.apply(lambda x: '_'.join([str(x['date_time']),str(x['user_id']),str(x['srch_destination_id'])]),axis=1)
     df["srch_ci"] = pd.to_datetime(df["srch_ci"])
     df["srch_co"] = pd.to_datetime(df["srch_co"])
-    df['year'] = df['date_time'].apply(lambda x: x.year)
-    df['month'] = df['date_time'].apply(lambda x: x.month)
+    df['year'] = df['date_time'].apply(lambda x: x.year).astype('category').cat.codes
+    df['month'] = df['date_time'].apply(lambda x: x.month).astype('category').cat.codes
     df['srch_duration'] = (df["srch_co"] - df["srch_ci"]).dt.days
     df['srch_trip_time_diff'] = (df["srch_co"] - df["date_time"]).dt.days
     timer.print_reset()
-
-    tqdm.write(f'Processing book/click-rate features')
-    timer.start()
-    booking_rate = dict(df.hotel_cluster.value_counts() / len(df))
-    df['book_rate'] = df['hotel_cluster'].apply(lambda x: booking_rate[x])
-    df.fillna(value=-1,inplace=True)
-    timer.print_reset()
-
-    tqdm.write(f'Explode with is_booking and hotel_cluster')
-    timer.start()
-    df['is_booking'] = df.apply(lambda x: explode_is_booking(x['is_booking'],x['hotel_cluster']),axis=1)
-    df['hotel_cluster'] = df.apply(lambda x: np.arange(n_hotel_cluster),axis=1)    
-    df = df.explode(['is_booking','hotel_cluster']).reset_index()
-    df['is_booking'] = df['is_booking'].astype(np.int64)
-    df['hotel_cluster'] = df['hotel_cluster'].astype(np.int64)
-    timer.print_reset()
-
-    tqdm.write(f'fm mapping on categorical features')
-    timer.start()
-    fm_mapping = read_fm_mapping(io_config['fm_mapping_path'])
-    timer.print_reset()
-    category_columns = [
-        'srch_destination_id','srch_destination_type_id',
-        'user_id','user_location_country','user_location_region','user_location_city',
-        'site_name','channel',
-        'is_mobile','is_package',
-        ]
-    for column in category_columns:
-        timer.start()
-        tqdm.write(f'Processing embedding for column {column}')
-        df[column+f'_embedvec'] = df[['hotel_cluster',column]].apply(lambda x: fm_mapping[x['hotel_cluster']][column][x[column]],axis=1)
-        df = pd.concat([df,pd.DataFrame(df[column+f'_embedvec'].tolist(), columns=[column+f'_dim{embeddim}' for embeddim in range(io_config['fm_embed_dim'])])],axis=1)
-        timer.print_reset()
     
-    df = df[
-        [
-            'date_time',
-            'year',
-            'month',
-            'srch_id',
-            'hotel_market',
-            'orig_destination_distance',
-            'srch_adults_cnt',
-            'srch_children_cnt',
-            'srch_rm_cnt',
-            'srch_duration',
-            'srch_trip_time_diff',
-            'book_rate',
-            'hotel_cluster',
-            'is_booking',
-        ] + [ column+f'_dim{embed_dim}' for embed_dim in range(io_config['fm_embed_dim']) for column in category_columns]
-    ]
+    tqdm.write(f'fm on categorical features')
+    timer.start()
+    for group,feature_columns in feature_groups.items():
+        df[group] = construct_df_fm(df,group,feature_columns,os.path.join(io_config['fm_model_dir'],group+'/'))
+    timer.print_reset()
+
+    tqdm.write(f'construct book_rate, is_booking')
+    timer.start()
+    book_rate_map = pickle.load(open(os.path.join(io_config['book_rate_path']),'rb')) 
+    click_rate_map = pickle.load(open(os.path.join(io_config['click_rate_path']),'rb')) 
+    click_rate = [click_rate_map[hotel_cluster] for hotel_cluster in range(n_hotel_cluster)]
+    df['click_rate'] = df.apply(lambda x: click_rate,axis=1)
+
+    book_rate_uniform_prior = [1./n_hotel_cluster for i in range(n_hotel_cluster)]
+    df['book_rate'] = df.apply(lambda x: book_rate_map.get(x['srch_destination_id'],book_rate_uniform_prior),axis=1)
+    df['is_booking'] = df.apply(lambda x: explode_is_booking(x['is_booking'],x['hotel_cluster']),axis=1)
+    timer.print_reset()
+    
+    tqdm.write(f'Explode df')
+    timer.start()
+    df = df.explode(features_to_explode).reset_index()
+    df['book_rate'] = df['book_rate'].astype(np.float64)
+    df['is_booking'] = df['is_booking'].astype(np.int64)
+    timer.print_reset()
+    
+    df = df[features_to_select]
     
     return df
-
-def train_test_split(df,timestamp=(2014,8,1)):
-    print('train test split with datatime')
-    train_test_timestamp = pd.Timestamp(datetime.datetime(*timestamp))
-    df['date_time'] = pd.to_datetime(df['date_time'])
-    X_train_inds = df.date_time < train_test_timestamp
-    X_test_inds = df.date_time > train_test_timestamp
-    print('baseline_preprocess train data')
-    train_data = baseline_preprocess(df[X_train_inds])
-    print('baseline_preprocess validation data')
-    valid_data = baseline_preprocess(df[X_test_inds])
-    return train_data,valid_data
 
 if __name__ == "__main__":
     if 'nsample' in io_config:
@@ -122,8 +119,12 @@ if __name__ == "__main__":
         if not os.path.exists(io_config['output_csv_dir']):
             os.makedirs(io_config['output_csv_dir'])
         train,valid = train_test_split(df)
-        train.to_csv(os.path.join(io_config['output_csv_dir'],'train.csv'))
-        valid.to_csv(os.path.join(io_config['output_csv_dir'],'valid.csv'))
+        train = preprocess(train)
+        train.to_csv(os.path.join(io_config['output_csv_dir'],'train.csv'),index=False)
+        del train
+        valid = preprocess(valid)
+        valid.to_csv(os.path.join(io_config['output_csv_dir'],'valid.csv'),index=False)
+        del valid
     elif 'chunksize' in io_config:
         dfs = pd.read_csv(io_config['input_csv_path'],chunksize=io_config['chunksize'])
         if not os.path.exists(io_config['output_csv_dir']):
