@@ -13,6 +13,7 @@ import torch.optim as optim
 from torchmetrics import AUROC
 from tqdm import tqdm
 
+from data.tools import train_test_split
 from model.fm import FactorizationMachineModel 
 
 torch.manual_seed(1)
@@ -35,18 +36,6 @@ def parse_arguments():
 def read_csv(path):
     df = pd.read_csv(path)
     return df
-
-def train_test_split(df,timestamp=(2014,8,1)):
-    print('train test split with datatime')
-    train_test_timestamp = pd.Timestamp(datetime.datetime(*timestamp))
-    df['date_time'] = pd.to_datetime(df['date_time'])
-    X_train_inds = df.date_time < train_test_timestamp
-    X_test_inds = df.date_time > train_test_timestamp
-    print('baseline_preprocess train data')
-    train_data = df[X_train_inds]
-    print('baseline_preprocess validation data')
-    valid_data = df[X_test_inds]
-    return train_data,valid_data
 
 def preprocess(df,feature_columns,target):
     for feature_column in feature_columns:
@@ -139,37 +128,6 @@ def save(model,trn_losses,val_losses,trn_metrics,val_metrics,train_config):
     ax.plot(range(n_val_epoch),val_metrics,label='valid',marker='o')
     fig.savefig(os.path.join(save_dir,train_config.get('metric_plot_fname','metrics.png')))
 
-def train_is_booking():
-
-    def prepare_tensor(df):
-        x = torch.tensor(df[feature_columns].values).long()
-        y = torch.tensor(df['is_booking'].values).float()
-        dataset = data.TensorDataset(x,y)
-        return x,y,dataset
-
-    io_config = dict(
-        input_csv_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/train.csv',
-    )
-    
-    train_config = dict(
-        lr=0.5,
-        wd=1e-5,
-        bs=1024,
-        epochs=100,
-        embedding_dim=4,
-        train_criterion=nn.BCELoss(),
-        valid_criterion=F1(),
-        save_model_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/output/211216_catvar_booking.model',
-    )
-    
-    feature_columns = ['srch_destination_id','srch_destination_type_id','user_id','user_location_country','user_location_region','user_location_city','site_name','channel','is_mobile','is_package','hotel_cluster',]
-
-    df = read_csv(io_config['input_csv_path'])
-    train_df,valid_df,field_dims = preprocess(df,feature_columns,'is_booking')
-    train_x,train_y,trainset = prepare_tensor(train_df)
-    valid_x,valid_y,validset = prepare_tensor(valid_df)
-    train(train_x,train_y,trainset,valid_x,valid_y,validset,field_dims,train_config)
-
 def train_hotel_cluster():
 
     bce_loss_fn = nn.BCELoss()
@@ -183,86 +141,88 @@ def train_hotel_cluster():
         return x,y,dataset
 
     io_config = dict(
-        input_csv_path='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/train_is_booking.csv',
+        input_csv_path='storage/train_is_booking_category.csv',
     )
 
-    feature_columns = [
-            'srch_destination_id','srch_destination_type_id',
-            'user_id','user_location_country','user_location_region','user_location_city',
-            'site_name','channel',
-            'is_mobile','is_package',
-            ]
-
-    train_config = dict(
-        lr=0.1,
-        wd=1e-5,
-        bs=1024,
-        epochs=1,
-        embedding_dim=4,
-        loss=bce,
-        metric=AUROC(),
-        save_model_dir='/cmsuf/data/store/user/t2/users/klo/MiscStorage/ForLucien/Kaggle/expedia-hotel-recommendations/output/211216_catvar_hotel_cluster/',
-    )
+    feature_groups = {
+            'srch_destination': ['srch_destination_id','srch_destination_type_id',],
+            'user': ['user_id','user_location_country','user_location_region','user_location_city',],
+            'hotel': ['hotel_continent','hotel_country','hotel_market',],
+            'market': ['site_name','channel','is_mobile','is_package',],
+    }
 
     df = read_csv(io_config['input_csv_path'])
-    train_df,valid_df,field_dims = preprocess(df,feature_columns,'hotel_cluster')
-    for hotel_cluster in range(n_hotel_cluster):
-        tqdm.write('-'*100)
-        tqdm.write('Processing hotel cluster {:d}'.format(hotel_cluster))
-        train_x,train_y,trainset = prepare_tensor(train_df,hotel_cluster)
-        valid_x,valid_y,validset = prepare_tensor(valid_df,hotel_cluster)
-        train_config['save_model_path'] = os.path.join(train_config['save_model_dir'],'hotel_cluster_{:d}/'.format(hotel_cluster),'saved.model')
-        model,trn_losses,val_losses,trn_metrics,val_metrics = train(train_x,train_y,trainset,valid_x,valid_y,validset,field_dims,train_config)
-        save(model,trn_losses,val_losses,trn_metrics,val_metrics,train_config)
+    
+    for group,feature_columns in feature_groups.items():
+        tqdm.write('='*100)
+        tqdm.write(f'{group} {feature_columns')
 
-def mapping_hotel_cluster():
+        train_config = dict(
+            lr=0.1,
+            wd=1e-5,
+            bs=1024,
+            epochs=1,
+            embedding_dim=4,
+            loss=bce,
+            metric=AUROC(),
+            save_model_dir=os.path.join('storage/output/211220_catvar_hotel_cluster/',group+'/'),
+        )
+        train_df,valid_df,field_dims = preprocess(df,feature_columns,'hotel_cluster')
+        for hotel_cluster in range(n_hotel_cluster):
+            tqdm.write('-'*100)
+            tqdm.write('Processing hotel cluster {:d}'.format(hotel_cluster))
+            train_x,train_y,trainset = prepare_tensor(train_df,hotel_cluster)
+            valid_x,valid_y,validset = prepare_tensor(valid_df,hotel_cluster)
+            train_config['save_model_path'] = os.path.join(train_config['save_model_dir'],'hotel_cluster_{:d}/'.format(hotel_cluster),'saved.model')
+            model,trn_losses,val_losses,trn_metrics,val_metrics = train(train_x,train_y,trainset,valid_x,valid_y,validset,field_dims,train_config)
+            save(model,trn_losses,val_losses,trn_metrics,val_metrics,train_config)
+
+def predict_hotel_cluster():
 
     import pickle
     
     def read_fm_model(model_dir):
         return {hotel_cluster: torch.load(os.path.join(model_dir,'hotel_cluster_{:d}/'.format(hotel_cluster),'saved.model')) for hotel_cluster in range(n_hotel_cluster)}
 
+    def prepare_tensor(df,feature_columns):
+        return torch.tensor(df[feature_columns].values).long()
+
     io_config = dict(
-        input_csv_path='storage/train_lite.csv',
-        fm_model_dir='storage/output/211216_catvar_hotel_cluster/',
+        input_csv_path='storage/train_is_booking_category.csv',
+        fm_model_dir='storage/output/211220_catvar_hotel_cluster/',
     )
 
-    feature_columns = [
-            'srch_destination_id','srch_destination_type_id',
-            'user_id','user_location_country','user_location_region','user_location_city',
-            'site_name','channel',
-            'is_mobile','is_package',
-            ]
+    feature_groups = {
+            'srch_destination': ['srch_destination_id','srch_destination_type_id',],
+            'user': ['user_id','user_location_country','user_location_region','user_location_city',],
+            'hotel': ['hotel_continent','hotel_country','hotel_market',],
+            'market': ['site_name','channel','is_mobile','is_package',],
+    }
 
     df = read_csv(io_config['input_csv_path'])
-    for feature_column in feature_columns:
-        df[feature_column] = df[feature_column].astype('category').cat.codes
-    feature_dims = [len(df[feature_column].unique()) for feature_column in feature_columns]
     fm_models = read_fm_model(io_config['fm_model_dir'])
+   
+    x = prepare_tensor(df,feature_columns)
+    dataloader = data.DataLoader(x,batch_size=int(2**18),shuffle=False)
     
-    tot_dim = sum(feature_dims)
-    cul_sum = 0
-    mapping = {}
+    init = {}
     for hotel_cluster in range(n_hotel_cluster):
-        tqdm.write(f'Processing {hotel_cluster}-th hotel_cluster')
-        mapping[hotel_cluster] = {}
-        for ifeature,feature_dim in enumerate(feature_dims):
-            tqdm.write(f'Processing {ifeature}-th feature: {feature_columns[ifeature]}')
+        fm_models[hotel_cluster].eval()
+        s = []
+        for x in tqdm(dataloader):
             with torch.no_grad():
-               inputs = torch.tensor(list(range(cul_sum,cul_sum+feature_dim)),dtype=torch.long)
-               embed = fm_models[hotel_cluster].embedding.embedding(inputs.to(device))
-            mapping[hotel_cluster][feature_columns[ifeature]] = embed.cpu().detach().numpy().tolist()
-        cul_sum += feature_dim
+                y_hat = fm_models[hotel_cluster](x.to(device))
+            s.extend(y_hat.cpu().detach().numpy().tolist())
+        init[hotel_cluster] = s
+    df_fm = pd.DataFrame({'fm':list(map(list,zip(*init.values())))})
+    df_fm = df_fm.explode(['fm']).astype(np.int64).reset_index()
+    df_fm.to_csv(os.path.join(io_config['fm_model_dir'],'fm.csv'),index=False)
 
-    pickle.dump(mapping,open(os.path.join(io_config['fm_model_dir'],'mapping.p'),'wb'))
-            
 if __name__ == '__main__':
     args = parse_arguments()
-    if args.task == 'train:is_booking':
-        train_is_booking()
-    elif args.task == 'train:hotel_cluster':
+    if args.task == 'train:hotel_cluster':
         train_hotel_cluster()
-    elif args.task == 'mapping:hotel_cluster':
-        mapping_hotel_cluster()
+    elif args.task == 'predict:hotel_cluster':
+        predict_hotel_cluster()
     else:
         raise RuntimeError('target {:s} not supported'.format(args.target))
