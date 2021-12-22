@@ -11,7 +11,7 @@ import xgboost as xgb
 from data.tools import x_y_group
 
 io_config = dict(
-    base_dir='storage/output/211221_baseline+fm_nsample1e5/',
+    base_dir='storage/output/211222_baseline+category_nsample1e5/',
     rev_dir='hyperopt_rev_01/',
 )
 io_config['save_model_path']=os.path.join(io_config['base_dir'],'pairwise.model')
