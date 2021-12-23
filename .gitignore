@@ -1,7 +1,4 @@
 __pycache__/
 *.sw*
 *.log
-data/
-input/
-job/
-saved_model/
+storage/
